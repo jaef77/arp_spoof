@@ -247,39 +247,6 @@ int send_arp_reply(pcap_t* handle, uint8_t *my_mac, uint8_t *v_mac, struct in_ad
     return 0;
 }
 
-// Relay the IP Packet
-int ip_packet_relay(u_char *rcv_buf, int len, uint8_t *my_mac, uint8_t *v_mac, uint8_t *t_mac, struct in_addr v_ip, const char *interface)
-{
-    eth_hdr_custom *rcv_eth;
-    ip_hdr_custom *rcv_ip;
-    rcv_eth = (eth_hdr_custom *)rcv_buf;
-    if((memcmp((rcv_eth->source_mac), v_mac, sizeof(rcv_eth->source_mac)) == 0)
-    && (memcmp((rcv_eth->dest_mac), my_mac, sizeof(rcv_eth->dest_mac)) == 0)
-    && (ntohs(rcv_eth->eth_type) == ETHERTYPE_IP))
-    {
-        int debug = 0;
-        char errbuf[PCAP_ERRBUF_SIZE];
-        int offset = 0;
-        pcap_t* handle = pcap_open_live(interface, BUFSIZ, 1, 1000, errbuf);
-        if(handle == NULL)
-        {
-            perror("ERROR : handle is NULL");
-            return -1;
-        }
-
-        memcpy((rcv_eth->source_mac), my_mac, sizeof(rcv_eth->source_mac));
-        memcpy((rcv_eth->dest_mac), t_mac, sizeof(rcv_eth->dest_mac));
-        memcpy(rcv_buf, rcv_eth, sizeof(eth_hdr_custom));
-
-        if(pcap_sendpacket(handle, (u_char*)(rcv_buf), len) < 0)
-        {
-            perror("ERROR : ARP Attack - sendpacket Failure");
-            return -1;
-        }
-    } // if(target packet)
-    return 0;
-}
-
 // ATTACK : Detect Recovery , Infection, Relay
 int sender_attack(uint8_t *my_mac, uint8_t *v_mac, uint8_t *t_mac, struct in_addr my_ip, struct in_addr v_ip, struct in_addr t_ip, const char *interface)
 {
